@@ -228,4 +228,4 @@ MIT — use, modify, and ship freely.
 
 ---
 
-**Built by [Your Name]** · Powered by **Groq Llama 3.3** + **Tavily AI** + **Streamlit**
+**Built by Jay Patwa** · Powered by **Groq Llama 3.3** + **Tavily AI** + **Streamlit**
