@@ -333,14 +333,30 @@ def _clean_leaders(leaders: list) -> list:
     """Keep only real person entries — drop HTML fragments or empty placeholders."""
     cleaned = []
     seen = set()
+    skip_names = {
+        "unknown", "n/a", "not publicly disclosed", "not available",
+        "not found", "none", "no information", "undisclosed",
+    }
     for p in leaders:
         name = (p.get("name") or "").strip()
         role = (p.get("role") or "").strip()
         bio = (p.get("bio") or "").strip()
-        if not name or name.lower() in ("unknown", "n/a", "not publicly disclosed"):
+        if not name or name.lower() in skip_names:
+            continue
+        # Keep the graceful degradation placeholder
+        if name == "Leadership information not verified":
+            cleaned.append({
+                "name": name,
+                "role": role,
+                "bio": bio,
+                "source_url": "",
+                "_is_placeholder": True,
+            })
             continue
         blob = f"{name} {role} {bio}".lower()
         if any(x in blob for x in ("<div", "class=", "leader-card", "leader-name", "{", "}")):
+            continue
+        if len(name) < 2 or name.startswith("http"):
             continue
         key = name.lower()
         if key in seen:
@@ -443,32 +459,95 @@ def render_report(report: dict):
     with tabs[1]:
         st.markdown('<div class="card"><h2>👥 Leadership Team</h2>', unsafe_allow_html=True)
         valid_leaders = _clean_leaders(leaders)
-        if valid_leaders:
-            cols = st.columns(min(len(valid_leaders), 3))
-            for i, p in enumerate(valid_leaders):
-                name = _esc_html(p["name"])
-                role = _esc_html(p["role"])
-                bio = _esc_html(p["bio"])
-                src = p.get("source_url", "")
-                src_html = (
-                    f'<div class="leader-source">📎 <a href="{_esc_html(src)}" target="_blank">Source</a></div>'
-                    if src else ""
-                )
-                with cols[i % len(cols)]:
-                    st.markdown(
-                        f"""<div class="leader-card">
-                            <div class="leader-name">{name}</div>
-                            <div class="leader-role">{role}</div>
-                            <div class="leader-bio">{bio}</div>
-                            {src_html}
-                        </div>""",
-                        unsafe_allow_html=True,
+        # Separate placeholders from real leaders
+        real_leaders = [p for p in valid_leaders if not p.get("_is_placeholder")]
+        placeholders = [p for p in valid_leaders if p.get("_is_placeholder")]
+
+        if real_leaders:
+            # Role grouping
+            role_groups = {
+                "Founders": [],
+                "C-Suite": [],
+                "Board & Management": [],
+                "Other Leaders": [],
+            }
+            for p in real_leaders:
+                role_lower = (p.get("role") or "").lower()
+                if any(k in role_lower for k in ("founder", "co-founder")):
+                    role_groups["Founders"].append(p)
+                elif any(k in role_lower for k in ("ceo", "cto", "cfo", "coo", "chief")):
+                    role_groups["C-Suite"].append(p)
+                elif any(k in role_lower for k in ("chairman", "chairperson", "director", "managing director", "md", "president", "board")):
+                    role_groups["Board & Management"].append(p)
+                else:
+                    role_groups["Other Leaders"].append(p)
+
+            group_icons = {
+                "Founders": "🏗️",
+                "C-Suite": "💼",
+                "Board & Management": "🏛️",
+                "Other Leaders": "👤",
+            }
+            for group_name, group_list in role_groups.items():
+                if not group_list:
+                    continue
+                icon = group_icons.get(group_name, "👤")
+                st.markdown(f"**{icon} {group_name}**")
+                cols = st.columns(min(len(group_list), 3))
+                for i, p in enumerate(group_list):
+                    name = _esc_html(p["name"])
+                    role = _esc_html(p["role"])
+                    bio = _esc_html(p["bio"])
+                    src = p.get("source_url", "")
+                    src_html = (
+                        f'<div class="leader-source">📎 <a href="{_esc_html(src)}" target="_blank">Source</a></div>'
+                        if src else ""
                     )
+                    with cols[i % len(cols)]:
+                        st.markdown(
+                            f"""<div class="leader-card">
+                                <div class="leader-name">{name}</div>
+                                <div class="leader-role">{role}</div>
+                                <div class="leader-bio">{bio}</div>
+                                {src_html}
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+        elif placeholders:
+            # Graceful degradation — show helpful guidance
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, rgba(251,191,36,0.08), rgba(245,158,11,0.05));
+                        border: 1px solid rgba(251,191,36,0.3); border-radius: 14px; padding: 24px; text-align: center;">
+                <div style="font-size: 2rem; margin-bottom: 8px;">🔍</div>
+                <div style="color: #fde68a; font-weight: 700; font-size: 1.1rem; margin-bottom: 10px;">
+                    Leadership information could not be automatically verified
+                </div>
+                <div style="color: #d1d5db; font-size: 0.92rem; line-height: 1.6;">
+                    Multiple search strategies were attempted. For the latest leadership details, try:
+                    <br>• The company's <b>official website</b> (About Us / Team page)
+                    <br>• <b>LinkedIn</b> company page
+                    <br>• <b>MCA / ROC filings</b> for Indian private limited companies
+                    <br>• <b>Crunchbase</b> or <b>ZaubaCorp</b> profiles
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            st.info(
-                "No CEO/CTO names were found in publicly indexed sources. "
-                "Try the exact legal name (e.g. 'Unada Labs Private Limited') or check the company's LinkedIn / website About page."
-            )
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, rgba(251,191,36,0.08), rgba(245,158,11,0.05));
+                        border: 1px solid rgba(251,191,36,0.3); border-radius: 14px; padding: 24px; text-align: center;">
+                <div style="font-size: 2rem; margin-bottom: 8px;">🔍</div>
+                <div style="color: #fde68a; font-weight: 700; font-size: 1.1rem; margin-bottom: 10px;">
+                    Leadership information could not be automatically verified
+                </div>
+                <div style="color: #d1d5db; font-size: 0.92rem; line-height: 1.6;">
+                    Multiple search strategies were attempted. For the latest leadership details, try:
+                    <br>• The company's <b>official website</b> (About Us / Team page)
+                    <br>• <b>LinkedIn</b> company page
+                    <br>• <b>MCA / ROC filings</b> for Indian private limited companies
+                    <br>• <b>Crunchbase</b> or <b>ZaubaCorp</b> profiles
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Business Info ─────────────────────────────────────────────────────────
