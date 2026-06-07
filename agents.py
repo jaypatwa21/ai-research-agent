@@ -55,18 +55,28 @@ class ResearcherAgent:
         return merged
 
     def _leadership_queries(self, company: str) -> List[str]:
+        """Tier 1 + Tier 2: targeted exact-match and context queries."""
         return [
-            f'"{company}" CEO CTO founder co-founder managing director leadership team',
-            f"{company} CEO CTO founder linkedin profile",
-            f"{company} directors board members crunchbase tracxn zaubacorp thecompanycheck",
-            f"{company} about us team leadership who founded",
+            # Tier 1 — exact role queries
+            f'"{company}" CEO',
+            f'"{company}" founder',
+            f'"{company}" chairman',
+            f'"{company}" managing director',
+            # Tier 2 — context queries
+            f'"{company}" leadership team',
+            f'"{company}" board of directors',
+            f'"{company}" executive team',
+            f'{company} about us team leadership',
         ]
 
     def _supplemental_leadership_queries(self, company: str) -> List[str]:
+        """Tier 3: last-resort queries — LinkedIn, MCA filings, databases."""
         return [
             f'"{company}" "CEO" OR "CTO" OR "co-founded by" OR "founded by"',
             f"{company} site:linkedin.com CEO OR CTO OR founder OR co-founder",
             f"{company} private limited directors MCA India CEO managing director",
+            f"{company} founder CEO chairman crunchbase tracxn zaubacorp thecompanycheck",
+            f"{company} key people management team annual report",
         ]
 
     def search_leadership(self, company: str, supplemental: bool = False,
@@ -80,7 +90,7 @@ class ResearcherAgent:
             if progress_cb:
                 label = "extra leadership" if supplemental else "leadership"
                 progress_cb(i / len(queries), f"🔎 Researching: {label} ({i}/{len(queries)})…")
-            searches.append(self._search(q, max_results=8))
+            searches.append(self._search(q, max_results=10))
         return self._merge_searches(searches)
 
     def gather(self, company: str, progress_cb=None) -> Dict:
@@ -132,12 +142,12 @@ class LLM:
         return resp.choices[0].message.content
 
 
-def _format_evidence(bundle: Dict, keys: List[str], char_budget: int = 10000) -> str:
+def _format_evidence(bundle: Dict, keys: List[str], char_budget: int = 12000) -> str:
     chunks = []
     for k in keys:
         sec = bundle.get(k, {})
-        max_results = 10 if k == "leadership" else 5
-        text_limit = 900 if k == "leadership" else 700
+        max_results = 15 if k == "leadership" else 5
+        text_limit = 1200 if k == "leadership" else 700
         if sec.get("answer"):
             chunks.append(f"[{k.upper()} — TAVILY ANSWER]\n{sec['answer']}\n")
         for r in sec.get("results", [])[:max_results]:
@@ -190,30 +200,52 @@ class AnalystAgent:
         self.llm = llm
         self.researcher = researcher
 
-    def _extract_leadership(self, company: str, bundle: Dict, char_budget: int = 4000) -> List[Dict]:
+    def _extract_leadership(self, company: str, bundle: Dict, char_budget: int = 8000) -> List[Dict]:
         evidence = _format_evidence(bundle, ["leadership"], char_budget=char_budget)
-        prompt = f"""Extract ONLY leadership information for **{company}** from this evidence.
+        prompt = f"""You are extracting leadership information for **{company}**.
+
+Your task: find EVERY person mentioned with a leadership role in the evidence below.
+
 Return STRICT JSON:
 {{
   "leadership": [
     {{
       "name": "Full Name",
-      "role": "CEO | CTO | Founder | Co-Founder | Chairman | MD | Director | CFO | COO | President",
-      "bio": "brief background",
-      "source_url": "URL where mentioned"
+      "role": "Founder | Co-Founder | CEO | CTO | CFO | COO | Chairman | Managing Director | Director | President | VP",
+      "bio": "brief background from evidence",
+      "source_url": "URL where this person was mentioned"
     }}
   ]
 }}
-Scan every line for person names next to titles. Include ANYONE with a leadership title.
+
+EXTRACTION RULES — FOLLOW EXACTLY:
+1. Scan EVERY line of evidence for person names near ANY of these keywords:
+   CEO, CTO, CFO, COO, founder, co-founder, chairman, chairperson,
+   managing director, MD, director, president, VP, vice president,
+   chief executive, chief technology, chief financial, chief operating.
+2. Look for these patterns:
+   - "Name, Title" or "Name — Title" or "Name (Title)"
+   - "Title: Name" or "Title - Name"
+   - "founded by Name" or "co-founded by Name"
+   - "Name is the CEO" or "Name serves as"
+   - "Name, who leads" or "Name heads"
+   - LinkedIn snippets: "Name · Title at {company}"
+   - MCA/ROC: "Director: Name"
+3. Include PARTIAL names if that is all the evidence has (e.g., "Mr. Sharma" is valid).
+4. If a person has multiple roles, list the most senior one.
+5. NEVER return an empty leadership array if there is ANY name near ANY title keyword.
+6. For source_url, use the URL line closest to where the name appeared.
+
 EVIDENCE:
 {evidence}
 """
-        raw = self.llm.complete(self.SYSTEM, prompt, json_mode=True, temperature=0.1, max_tokens=1200)
+        raw = self.llm.complete(self.SYSTEM, prompt, json_mode=True, temperature=0.1, max_tokens=1800)
         return _sanitize_leadership(_safe_json(raw).get("leadership", []))
 
     def analyze(self, company: str, bundle: Dict) -> Dict:
         evidence = _format_evidence(
-            bundle, ["overview","products","news","financials","leadership","website"]
+            bundle, ["overview","products","news","financials","leadership","website"],
+            char_budget=14000,
         )
         prompt = f"""Analyze **{company}** using ONLY the evidence below.
 
@@ -237,9 +269,9 @@ Return STRICT JSON with this exact schema:
   "leadership": [
      {{
         "name": "Full Name — MUST be a real person name found in the evidence",
-        "role": "CEO | CTO | CFO | Founder | Co-Founder | Chairman | MD | Director | President | COO",
+        "role": "Founder | Co-Founder | CEO | CTO | CFO | COO | Chairman | Managing Director | Director | President | VP",
         "bio": "1-2 sentences: their background, years in role, or prior company if found in evidence",
-        "source_url": "The exact URL from the evidence where this person's name was mentioned. If multiple, pick the best one. Empty string only if truly not found."
+        "source_url": "The exact URL from the evidence where this person's name was mentioned."
      }}
   ],
   "sources": [
@@ -247,14 +279,22 @@ Return STRICT JSON with this exact schema:
   ]
 }}
 
-LEADERSHIP EXTRACTION RULES (critical):
-1. Scan ALL evidence sections carefully for ANY person names associated with titles: CEO, CTO, CFO, Founder, Co-Founder, Chairman, Managing Director, MD, Director, President, COO, VP.
-2. If a full name appears anywhere in the evidence next to a title, include them.
-3. Prioritize: Founder/Co-Founder first, then CEO, then CTO/CFO/COO, then Chairman/MD, then Directors.
-4. NEVER return an empty leadership array if any names are found anywhere in the evidence.
-5. If only a partial name is found (e.g. "Mr. Sharma, CEO"), still include it with what you know.
-6. source_url: use the URL of the evidence chunk where that person's name appeared.
-7. Real names ONLY — never invent. But search ALL evidence chunks thoroughly before giving up.
+LEADERSHIP EXTRACTION RULES (CRITICAL — follow exactly):
+1. Scan EVERY section of the evidence (overview, products, news, financials, leadership, website) for person names near leadership titles.
+2. Leadership titles to look for: CEO, CTO, CFO, COO, Founder, Co-Founder, Chairman, Chairperson, Managing Director, MD, Director, President, VP, Vice President, Chief Executive, Chief Technology Officer, Chief Financial Officer.
+3. Name patterns to match:
+   - "Name, Title" or "Name — Title" or "Name (Title)"
+   - "Title: Name" or "Title - Name"
+   - "founded by Name" or "co-founded by Name"
+   - "Name is the CEO" or "Name serves as"
+   - "Name heads" or "Name leads" or "under Name's leadership"
+   - LinkedIn: "Name · Title at {company}"
+   - MCA/ROC: "Director: Name"
+4. Prioritize: Founder/Co-Founder first, then CEO, CTO/CFO/COO, Chairman/MD, Directors.
+5. Include partial names (e.g., "Mr. Sharma") if that's all available.
+6. NEVER return an empty leadership array if ANY person name appears near any title in the evidence.
+7. For source_url, use the URL from the evidence chunk where the name appeared.
+8. Real names ONLY — never invent names. But search ALL evidence chunks thoroughly.
 
 SOURCES RULES:
 - Include 5-10 diverse URLs. Classify each type accurately.
@@ -262,22 +302,39 @@ SOURCES RULES:
 EVIDENCE:
 {evidence}
 """
-        raw = self.llm.complete(self.SYSTEM, prompt, json_mode=True, temperature=0.2, max_tokens=3000)
+        raw = self.llm.complete(self.SYSTEM, prompt, json_mode=True, temperature=0.2, max_tokens=3500)
         result = _safe_json(raw)
 
-        # If leadership is still empty, run supplemental web searches and retry
-        if not result.get("leadership"):
-            leaders = self._extract_leadership(company, bundle)
-            if leaders:
-                result["leadership"] = leaders
+        # ── Multi-pass leadership extraction ──────────────────────────────────
+        leaders_found = _sanitize_leadership(result.get("leadership", []))
 
-        if not result.get("leadership") and self.researcher:
+        # Pass 2: Dedicated leadership extraction if < 3 leaders found
+        if len(leaders_found) < 3:
+            extra_leaders = self._extract_leadership(company, bundle, char_budget=8000)
+            leaders_found = _merge_leaders(leaders_found, extra_leaders)
+
+        # Pass 3: Supplemental web search if < 2 leaders found
+        if len(leaders_found) < 2 and self.researcher:
             extra = self.researcher.search_leadership(company, supplemental=True)
             existing = bundle.get("leadership", {})
             bundle["leadership"] = ResearcherAgent._merge_searches([existing, extra])
-            leaders = self._extract_leadership(company, bundle, char_budget=6000)
-            if leaders:
-                result["leadership"] = leaders
+            extra_leaders = self._extract_leadership(company, bundle, char_budget=12000)
+            leaders_found = _merge_leaders(leaders_found, extra_leaders)
+
+        # Graceful degradation: never leave leadership completely empty
+        if not leaders_found:
+            leaders_found = [{
+                "name": "Leadership information not verified",
+                "role": "See sources for further research",
+                "bio": (
+                    f"Multiple search strategies were attempted for {company}. "
+                    "Check the official company website, LinkedIn page, "
+                    "or MCA/ROC filings for the latest leadership information."
+                ),
+                "source_url": "",
+            }]
+
+        result["leadership"] = leaders_found
 
         # Supplement sources with raw Tavily URLs
         if not result.get("sources"):
@@ -288,7 +345,6 @@ EVIDENCE:
                 result["sources"].append(ts)
                 existing_urls.add(ts["url"])
 
-        result["leadership"] = _sanitize_leadership(result.get("leadership", []))
         return result
 
 
@@ -536,15 +592,22 @@ def _strip_html(text: str) -> str:
 def _sanitize_leadership(leaders: List[Dict]) -> List[Dict]:
     cleaned = []
     seen = set()
+    skip_names = {
+        "unknown", "n/a", "not publicly disclosed", "not available",
+        "not found", "none", "no information", "undisclosed",
+    }
     for p in leaders or []:
         name = _strip_html(p.get("name", ""))
         role = _strip_html(p.get("role", ""))
         bio = _strip_html(p.get("bio", ""))
-        if not name or name.lower() in ("unknown", "n/a"):
+        if not name or name.lower().strip() in skip_names:
             continue
-        if any(x in f"{name} {role} {bio}".lower() for x in ("<div", "class=", "leader-card")):
+        if any(x in f"{name} {role} {bio}".lower() for x in ("<div", "class=", "leader-card", "leader-name")):
             continue
-        key = name.lower()
+        # Skip entries that are clearly not person names
+        if len(name) < 2 or name.startswith("http"):
+            continue
+        key = name.lower().strip()
         if key in seen:
             continue
         seen.add(key)
@@ -555,6 +618,18 @@ def _sanitize_leadership(leaders: List[Dict]) -> List[Dict]:
             "source_url": (p.get("source_url") or "").strip(),
         })
     return cleaned
+
+
+def _merge_leaders(existing: List[Dict], new: List[Dict]) -> List[Dict]:
+    """Merge two leadership lists, deduplicating by name."""
+    seen = {p["name"].lower().strip() for p in existing}
+    merged = list(existing)
+    for p in new:
+        key = p["name"].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            merged.append(p)
+    return merged
 
 
 def _safe_json(raw: str) -> Dict:
